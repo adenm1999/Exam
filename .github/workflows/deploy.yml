@@ -8,22 +8,17 @@ on:
 
 env:
   REGION: europe-west2
-  REGISTRY: europe-west2-docker.pkg.dev
   IMAGE_NAME: du-etl
 
 jobs:
-
-  # ── 1. Test ─────────────────────────────────────────────────────────────────
   test:
-    name: Run tests
+    name: Test
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
@@ -31,75 +26,72 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run pytest with coverage
-        run: |
-          pytest tests/ -v \
-            --cov=etl \
-            --cov-report=term-missing \
-            --cov-fail-under=80
+      - name: Run pytest
+        run: pytest tests/ -v --cov=etl --cov-report=term-missing --cov-fail-under=80
 
-  # ── 2. Build & Push ─────────────────────────────────────────────────────────
   build-and-push:
-    name: Build & push Docker image
-    needs: test
+    name: Build & Push
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test
+    # Only run on pushes to main, not on PRs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      id-token: write   # Required for Workload Identity Federation
 
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
-      - name: Set image tag (short git SHA)
+      - name: Derive image tag (short SHA)
         id: meta
-        run: echo "tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Build Docker image
+      - name: Build and push
+        env:
+          IMAGE_URI: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.IMAGE_NAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
         run: |
-          docker build \
-            -t ${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/${{ env.IMAGE_NAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }} \
-            -t ${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/${{ env.IMAGE_NAME }}/${{ env.IMAGE_NAME }}:latest \
-            .
+          docker build --tag "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
 
-      - name: Push Docker image
-        run: |
-          docker push ${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/${{ env.IMAGE_NAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
-          docker push ${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/${{ env.IMAGE_NAME }}/${{ env.IMAGE_NAME }}:latest
-
-  # ── 3. Deploy via Terraform ──────────────────────────────────────────────────
   terraform:
-    name: Terraform apply
-    needs: build-and-push
+    name: Terraform Apply
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      id-token: write
 
     defaults:
       run:
         working-directory: terraform
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "~1.6"
+          terraform_version: "1.8"
 
       - name: Terraform init
         run: terraform init
@@ -108,10 +100,9 @@ jobs:
         run: |
           terraform plan \
             -var="project_id=${{ secrets.GCP_PROJECT_ID }}" \
-            -var="region=${{ env.REGION }}" \
             -var="image_tag=${{ needs.build-and-push.outputs.image_tag }}" \
-            -var="du_api_url=${{ secrets.TF_DU_API_URL }}" \
-            -var="database_url=${{ secrets.TF_DATABASE_URL }}" \
+            -var="database_url=${{ secrets.DATABASE_URL }}" \
+            -var="du_api_url=${{ secrets.DU_API_URL }}" \
             -out=tfplan
 
       - name: Terraform apply
