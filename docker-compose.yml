@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: du_etl_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: du_etl
+      POSTGRES_USER: du_user
+      POSTGRES_PASSWORD: du_password
+    volumes:
+      # Initialise schema on first startup
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # Persist data across restarts
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      # Expose locally so you can inspect with psql / DBeaver
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U du_user -d du_etl"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── ETL pipeline ────────────────────────────────────────────────────────────
+  etl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: du_etl_pipeline
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://du_user:du_password@db:5432/du_etl
+    depends_on:
+      db:
+        condition: service_healthy
+    # Restart policy: never — this is a one-shot job, not a long-running service.
+    restart: "no"
+
+volumes:
+  pg_data:
