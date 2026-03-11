@@ -14,7 +14,7 @@ def fetch_chapters(base_url: str, timeout: int = 30) -> list[dict[str, Any]]:
     while True:
         params = {
             "where": "1=1",
-            "outFields": "ChapterID,University_Chapter,City,State",
+            "outFields": "*",
             "returnGeometry": "true",
             "resultOffset": offset,
             "resultRecordCount": PAGE_SIZE,
